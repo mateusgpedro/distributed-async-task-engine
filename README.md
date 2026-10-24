@@ -1,192 +1,129 @@
-# Distributed Asynchronous Task Engine Application
+# Distributed Asynchronous Task Engine
 
-A containerized, multi-service web application that demonstrates asynchronous computation, inter-service communication, and persistent data storage using Docker, React, Node.js, PostgreSQL, and Redis.
+A containerized, multi-service backend and web architecture that demonstrates asynchronous task dispatch, bounded background computation, reverse-proxy routing, and dual-storage persistence using Docker, Node.js, Express, React, PostgreSQL, Redis, and Nginx.
 
-## Overview
+## System Architecture
 
-This project implements a distributed-style application for calculating Fibonacci values. Users can submit an index through a web interface, the API records the request, and a dedicated worker calculates the result asynchronously. Redis is used to coordinate work and cache computed values, while PostgreSQL stores submitted indices.
-
-The application is split into independently containerized services, each with a distinct responsibility.
-
-## Architecture
+**Request & Event Flow:**
+`Client (React) → Nginx Reverse Proxy (:80) → Express API (:5000) → PostgreSQL (Durable Audit Log) + Redis Pub/Sub (Event Dispatch) → Worker Container → Redis Hash Store`
 
 ```mermaid
-flowchart TD
-    User[User / Browser]
-    Nginx[Nginx Reverse Proxy]
-    Client[React Client]
-    API[Express API]
-    Redis[(Redis)]
-    Postgres[(PostgreSQL)]
-    Worker[Background Worker]
+flowchart LR
+    Client["Client (React)"]
+    Nginx["Nginx Reverse Proxy (:80)"]
+    API["Express API (:5000)"]
+    Postgres[("PostgreSQL (Durable Audit Log)")]
+    PubSub[["Redis Pub/Sub (Event Dispatch)"]]
+    Worker["Worker Container"]
+    HashStore[("Redis Hash Store")]
 
-    User --> Nginx
-    Nginx --> Client
-    Nginx --> API
-    Client --> API
-    API --> Postgres
-    API --> Redis
-    API -->|Publish index| Redis
-    Redis -->|Subscribe to insert channel| Worker
-    Worker -->|Store computed result| Redis
+    Client --> Nginx
+    Nginx -->|"/ (Static / Dev UI)"| Client
+    Nginx -->|"/api/* (Strips /api prefix)"| API
+    API -->|"INSERT task parameter"| Postgres
+    API -->|"PUBLISH insert event"| PubSub
+    PubSub -->|"SUBSCRIBE insert"| Worker
+    Worker -->|"HSET computed output"| HashStore
+    API -->|"HGETALL / SELECT"| HashStore
 ```
 
-### Services
+### Services Overview
 
 | Service | Responsibility | Technology |
 |---|---|---|
-| Client | Web interface for submitting and viewing Fibonacci calculations | React |
-| API | HTTP endpoints, request validation, persistence, and work dispatch | Node.js, Express |
-| Worker | Asynchronous Fibonacci computation | Node.js |
-| Cache and messaging | Stores computed results and distributes work through Redis pub/sub | Redis |
-| Database | Persists submitted Fibonacci indices | PostgreSQL |
-| Reverse proxy | Routes incoming traffic to application services | Nginx |
-| Orchestration | Defines and runs the multi-container environment | Docker Compose |
+| **Nginx Reverse Proxy** | Single entry point (`:80`), routes `/` to React client and `/api/*` to Express API | Nginx |
+| **Client** | Dashboard for submitting task parameters, viewing PostgreSQL audit records, and inspecting Redis results | React |
+| **Express API** | Strict input validation, relational audit logging, event publication, and healthcheck reporting | Node.js, Express |
+| **Worker** | Subscribes to task events, executes bounded $O(n)$ computation, and writes results with `SIGTERM` graceful shutdown | Node.js |
+| **PostgreSQL** | Durable relational audit log of all submitted task parameters | PostgreSQL 15 |
+| **Redis** | Low-latency Pub/Sub message broker and in-memory hash store for computed task outputs | Redis 7 |
 
-## How it works
+## Dual-Storage Design Rationale
 
-1. **Submit:** A user submits a Fibonacci index through the web client.
-2. **Validate:** The API rejects indices greater than the configured limit of 40.
-3. **Persist:** The API stores the submitted index in PostgreSQL.
-4. **Dispatch:** The API publishes the index to a Redis channel.
-5. **Compute:** The background worker subscribes to the channel and calculates the Fibonacci value.
-6. **Cache:** The worker stores the result in Redis.
-7. **Retrieve:** The client can request previously submitted indices and computed results through the API.
+This system intentionally separates **durable audit state** from **transient execution state**:
 
-This separation keeps computation outside the HTTP request handler and demonstrates a basic asynchronous processing pattern.
-
-## Technology Stack
-
-- **JavaScript / Node.js** — server-side application logic
-- **React** — client-side interface
-- **Express** — REST API
-- **PostgreSQL** — persistent relational storage
-- **Redis** — caching and publish/subscribe messaging
-- **Docker** — service containerization
-- **Docker Compose** — local multi-service orchestration
-- **Nginx** — reverse proxy and request routing
-- **GitHub Actions** — workflow configuration
+- **PostgreSQL (Durable Relational Audit Log):** Stores a permanent, append-only relational record (`values` table) of every valid task parameter submitted to the system. Even if the in-memory cache is flushed or restarted, the historical record of requested tasks remains intact.
+- **Redis (Message Broker & Fast Key-Value Store):** Serves a dual role as the low-latency Pub/Sub dispatch channel (`insert`) between the API and worker processes, and as an O(1) in-memory hash table (`values`) holding the latest computed output for each task parameter.
 
 ## Getting Started
 
 ### Prerequisites
 
-- Docker
-- Docker Compose
-- Git
+- Docker & Docker Compose
 
-### Run locally
+### Run Locally
 
-Clone the repository:
+1. Clone the repository:
 
 ```bash
-git clone https://github.com/mateusgpedro/multi-container-project.git
-cd multi-container-project
+git clone https://github.com/mateusgpedro/distributed-async-task-engine.git
+cd distributed-async-task-engine
 ```
 
-Build and start the development environment:
+2. (Optional) Copy the environment variable template:
+
+```bash
+cp .env.example .env
+```
+
+3. Build and start the multi-container environment:
+
+```bash
+docker compose up --build
+```
+
+For hot-reloading during local development:
 
 ```bash
 docker compose -f docker-compose-dev.yml up --build
 ```
 
-The development Compose configuration defines the client, API, worker, Nginx, PostgreSQL, and Redis services.
+4. Access the application at **http://localhost:3050**.
 
-Open the application at:
-
-**http://localhost:3050**
-
-To stop the services:
+To stop the containers and remove volumes:
 
 ```bash
-docker compose -f docker-compose-dev.yml down
+docker compose down -v
 ```
-
-To stop the services and remove their Compose-managed volumes, if any:
-
-```bash
-docker compose -f docker-compose-dev.yml down -v
-```
-
-> **Note:** The development configuration includes local database credentials for development use. Do not reuse these credentials in production. If startup fails, check the Docker logs and confirm that all services have started successfully.
 
 ## API Reference
 
-The Express API exposes the following routes:
+Nginx routes requests prefixed with `/api/*` to the Express API by stripping the `/api` prefix:
 
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/` | Basic API response |
-| `GET` | `/values/all` | Retrieve submitted indices from PostgreSQL |
-| `GET` | `/values/current` | Retrieve computed values currently stored in Redis |
-| `POST` | `/values` | Submit an index for asynchronous calculation |
+| Method | Endpoint (via Nginx) | Express Route | Description |
+|---|---|---|---|
+| `GET` | `/api/health` | `/health` | Verifies PostgreSQL query execution (`SELECT 1`) and Redis connectivity |
+| `GET` | `/api/values/all` | `/values/all` | Retrieves all submitted task parameters from PostgreSQL |
+| `GET` | `/api/values/current` | `/values/current` | Retrieves all computed key-value pairs stored in Redis |
+| `POST` | `/api/values` | `/values` | Validates and submits a task parameter for asynchronous execution |
 
-### Submit a calculation
+### Submit a Task
 
 ```http
-POST /values
+POST /api/values
 Content-Type: application/json
-```
 
-Request body:
-
-```json
 {
   "index": 10
 }
 ```
 
-A valid request is acknowledged with a response indicating that processing has been initiated. The calculation is performed by the worker rather than directly in the request handler.
+- **`200 OK`**: `{ "working": true }` — Task parameter persisted to PostgreSQL and dispatched to Redis.
+- **`400 Bad Request`**: `{ "error": "Invalid task parameter" }` — Non-integer or negative payload rejected.
+- **`422 Unprocessable Entity`**: `{ "error": "Index too high" }` — Parameter exceeds the configured bound (`40`).
 
-Indices greater than 40 are rejected with HTTP `422 Unprocessable Entity`.
+## Engineering Trade-offs & Future Production Hardening
 
-## Engineering Concepts Demonstrated
+To keep the local multi-container footprint lightweight and self-contained, this repository uses Redis Pub/Sub and client-triggered fetches. For a high-throughput production deployment, the following architectural upgrades apply:
 
-### Service separation
-
-The application separates HTTP handling, background computation, persistent storage, caching, and request routing into distinct services.
-
-### Asynchronous processing
-
-Redis pub/sub provides a simple mechanism for communicating between the API and the worker without requiring the API to calculate Fibonacci values itself.
-
-### Persistent versus transient data
-
-PostgreSQL stores submitted indices, while Redis holds computed results for fast retrieval. This illustrates the different roles of a relational database and an in-memory data store.
-
-### Containerized development
-
-Docker Compose brings the application's services together in a reproducible local environment, reducing the need to install each infrastructure dependency directly on the host machine.
-
-### Reverse proxying
-
-Nginx provides an entry point for routing requests to the relevant application services.
-
-## Limitations and Future Improvements
-
-This project is a learning project that demonstrates multi-container application architecture and asynchronous processing. It is not intended to be a production-grade job-processing platform.
-
-Potential improvements include:
-
-- Replace Redis pub/sub with a durable queue if jobs must survive worker downtime.
-- Add retries, explicit job states, and error handling for failed calculations.
-- Add health checks and service readiness handling.
-- Validate input types and reject negative or non-integer indices.
-- Add automated unit and integration tests.
-- Add structured logging and monitoring.
-- Use environment-based configuration and secrets management.
-- Pin dependency and container image versions.
-- Add CI checks for building and testing each service.
-
-These improvements would make the system more resilient and easier to operate under failure.
-
-## What I Learned
-
-This project explores how a web application can be decomposed into multiple services with separate responsibilities. It also provides practical experience with Docker Compose, HTTP APIs, Redis-based messaging, background computation, PostgreSQL, and reverse-proxy configuration.
+- **Durable Work Queues over Redis Pub/Sub:** Redis `PUBLISH`/`SUBSCRIBE` provides *at-most-once* delivery (fire-and-forget: if a worker is offline during publish, the message is dropped; if multiple workers subscribe, every worker computes the same message). In production, replace Pub/Sub with **Redis Streams**, **BullMQ** (`LPUSH`/`BRPOP`), or **RabbitMQ** for *at-least-once* delivery, competing consumer worker pools, exponential backoff retries, and dead-letter queues (DLQ).
+- **Server Push over Client Polling:** Replace manual client fetches with **Server-Sent Events (SSE)** or **WebSockets** so the API pushes state transitions to the browser immediately when the worker completes a job.
+- **Idempotency Keys on Task Submission:** Add an `Idempotency-Key` header or unique constraint on `POST /api/values` so duplicate network retries do not trigger redundant PostgreSQL writes or duplicate worker dispatches.
+- **Explicit Job Lifecycle State Machine:** Expand the Redis hash value into structured lifecycle metadata (`PENDING` → `PROCESSING` → `COMPLETED` / `FAILED`) with timestamps and worker heartbeats to detect stalled tasks.
 
 ## Author
 
 **Mateus Pedro**
 
 - GitHub: [@mateusgpedro](https://github.com/mateusgpedro)
-- Repository: [multi-container-project](https://github.com/mateusgpedro/multi-container-project)
+- Repository: [distributed-async-task-engine](https://github.com/mateusgpedro/distributed-async-task-engine)
