@@ -1,4 +1,4 @@
-# Multi-Container Application
+# Distributed Asynchronous Task Engine Application
 
 A containerized, multi-service web application that demonstrates asynchronous computation, inter-service communication, and persistent data storage using Docker, React, Node.js, PostgreSQL, and Redis.
 
