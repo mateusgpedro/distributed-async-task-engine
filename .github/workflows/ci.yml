@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run client tests
+        run: |
+          docker build -t distributed-task-engine/client-test -f ./client/Dockerfile.dev ./client
+          docker run -e CI=true distributed-task-engine/client-test npm test
+
+      - name: Build production images
+        run: |
+          docker build -t distributed-task-engine/client ./client
+          docker build -t distributed-task-engine/nginx ./nginx
+          docker build -t distributed-task-engine/server ./server
+          docker build -t distributed-task-engine/worker ./worker
