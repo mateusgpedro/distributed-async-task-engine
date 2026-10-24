@@ -20,9 +20,18 @@ const pgClient = new Pool({
 });
 pgClient.on("error", () => console.log("Lost PG connection"));
 
-pgClient
-  .query("CREATE TABLE IF NOT EXISTS values(number INT)")
-  .catch((err) => console.log(err));
+async function initDb(retries = 5, delay = 2000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      await pgClient.query("CREATE TABLE IF NOT EXISTS values (number INT)");
+      return;
+    } catch (err) {
+      console.error(`Postgres init attempt ${i + 1} failed:`, err.message);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+initDb();
 
 // Redis Client Setup
 const redis = require("redis");
@@ -39,32 +48,63 @@ app.get("/", (req, res) => {
   res.send("Hi");
 });
 
-app.get("/values/all", async (req, res) => {
-  const values = await pgClient.query("SELECT * from values");
-
-  res.send(values.rows);
+app.get(["/health", "/api/health"], async (req, res) => {
+  try {
+    await pgClient.query("SELECT 1");
+    if (!redisClient.connected) {
+      return res.status(503).json({ status: "error", error: "Redis disconnected" });
+    }
+    res.status(200).json({ status: "ok" });
+  } catch (err) {
+    res.status(500).json({ status: "error", error: "Database unavailable" });
+  }
 });
 
-app.get("/values/current", async (req, res) => {
+app.get("/values/all", async (req, res) => {
+  try {
+    const values = await pgClient.query("SELECT * FROM values");
+    res.send(values.rows);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch task history" });
+  }
+});
+
+app.get("/values/current", (req, res) => {
   redisClient.hgetall("values", (err, values) => {
-    res.send(values);
+    if (err) {
+      return res.status(500).json({ error: "Failed to fetch computed values" });
+    }
+    res.send(values || {});
   });
 });
 
 app.post("/values", async (req, res) => {
-  const index = req.body.index;
+  const rawIndex = req.body.index;
+  const parsedIndex = Number.parseInt(rawIndex, 10);
 
-  if (parseInt(index) > 40) {
-    return res.status(422).send("Index too high");
+  if (
+    Number.isNaN(parsedIndex) ||
+    String(rawIndex).trim() !== String(parsedIndex) ||
+    parsedIndex < 0
+  ) {
+    return res.status(400).json({ error: "Invalid task parameter" });
   }
 
-  redisClient.hset("values", index, "Nothing yet!");
-  redisPublisher.publish("insert", index);
-  pgClient.query("INSERT INTO values(number) VALUES($1)", [index]);
+  if (parsedIndex > 40) {
+    return res.status(422).json({ error: "Index too high" });
+  }
 
-  res.send({ working: true });
+  try {
+    redisClient.hset("values", String(parsedIndex), "Nothing yet!");
+    redisPublisher.publish("insert", String(parsedIndex));
+    await pgClient.query("INSERT INTO values(number) VALUES($1)", [parsedIndex]);
+
+    res.send({ working: true });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to submit task" });
+  }
 });
 
-app.listen(5000, (err) => {
-  console.log("Listening");
+app.listen(5000, () => {
+  console.log("Listening on port 5000");
 });
