@@ -1,18 +1,33 @@
-version: '3'
 services:
   postgres:
-    image: 'postgres:latest'
+    image: "postgres:15-alpine"
     environment:
-      - POSTGRES_PASSWORD=postgres_password
+      - POSTGRES_PASSWORD=${PGPASSWORD:-postgres_password}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   redis:
-    image: 'redis:latest'
+    image: "redis:7-alpine"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   nginx:
     restart: always
     build:
       dockerfile: Dockerfile.dev
       context: ./nginx
     ports:
-      - '3050:80'
+      - "3050:80"
+    depends_on:
+      - api
+      - client
+
   api:
     build:
       dockerfile: Dockerfile.dev
@@ -20,31 +35,40 @@ services:
     volumes:
       - /home/node/app/node_modules
       - ./server:/home/node/app
-    environment: 
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - PGUSER=postgres
-      - PGHOST=postgres
-      - PGDATABASE=postgres
-      - PGPASSWORD=postgres_password
-      - PGPORT=5432
+    environment:
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - PGUSER=${PGUSER:-postgres}
+      - PGHOST=${PGHOST:-postgres}
+      - PGDATABASE=${PGDATABASE:-postgres}
+      - PGPASSWORD=${PGPASSWORD:-postgres_password}
+      - PGPORT=${PGPORT:-5432}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   client:
     build:
       dockerfile: Dockerfile.dev
       context: ./client
     volumes:
-      - /home/app/node_modules
+      - /home/node/app/node_modules
       - ./client:/home/node/app
     environment:
       - WDS_SOCKET_PORT=0
-  
+
   worker:
     build:
       dockerfile: Dockerfile.dev
       context: ./worker
     volumes:
-      - /home/app/node_modules
+      - /home/node/app/node_modules
       - ./worker:/home/node/app
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379    
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+    depends_on:
+      redis:
+        condition: service_healthy
